@@ -50,6 +50,7 @@ build/
 bld/
 [Bb]in/
 [Oo]bj/
+install/
 
 # Visual C++ cache files
 ipch/

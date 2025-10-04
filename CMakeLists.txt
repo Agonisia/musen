@@ -2,7 +2,7 @@
 
 # TODO: optional GPU
 
-CMAKE_MINIMUM_REQUIRED(VERSION 3.0.0)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.5.0)
 
 SET(VERSION 1.74.2)
 SET(SOVERSION 1.74)
@@ -84,7 +84,7 @@ SET(cuda_cc_10   "30;32;35;37;50;52;53;60;61;62;70;72;75")
 SET(cuda_cc_11_0 "50;52;53;60;61;62;70;72;75;80")
 SET(cuda_cc_11_1 "50;52;53;60;61;62;70;72;75;80;86")
 SET(cuda_cc_11_5 "50;52;53;60;61;62;70;72;75;80;86;87")
-SET(cuda_cc_11_8 "50;52;53;60;61;62;70;72;75;80;86;87;89;90")
+SET(cuda_cc_11_8 "75;80;86;87;89;90")
 FIND_PACKAGE(${cuda_package_name} REQUIRED)
 INCLUDE_DIRECTORIES(${${cuda_include_dirs_name}})
 LINK_DIRECTORIES(${cuda_link_directories_name})
