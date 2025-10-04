@@ -2,13 +2,13 @@
    This file is part of MUSEN framework http://msolids.net/musen.
    See LICENSE file for license and warranty information. */
 
-#include "ModelPWPopovJKR.h"
+#include "ModelPWSUP.h"
 
-CModelPWPopovJKR::CModelPWPopovJKR()
+CModelPWSUP::CModelPWSUP()
 {
-	m_name = "SUP-JKR";
-	m_uniqueKey = "5048D3D96D3843949F5B427DF9FCCEDF";
-	m_helpFileName = "/Contact Models/PopovJKR.pdf";
+	std::cout << "Registering PW SUP model..." << std::endl; 
+	m_name          = "SUP (Particle-Wall)";
+	m_uniqueKey     = "8c9f5e24-9b8d-43af-a12e-518c67295988";  // 需要新的唯一ID
 	m_hasGPUSupport = true;
 	
 	// SUP模型参数
@@ -16,7 +16,8 @@ CModelPWPopovJKR::CModelPWPopovJKR()
 	/* 1*/ AddParameter("SURFACE_ENERGY", "Surface energy density [J/m²]", 0.0);
 }
 
-void CModelPWPopovJKR::CalculatePW(double _time, double _timeStep, size_t _iWall, size_t _iPart, const SInteractProps& _interactProp, SCollision* _collision) const
+void CModelPWSUP::CalculatePW(double _time, double _timeStep, size_t _iWall, size_t _iPart,
+                               const SInteractProps& _interactProp, SCollision* _collision) const
 {
 	// 获取SUP参数
 	const double l = m_parameters[0].value;      // SUP缩放因子
@@ -125,13 +126,15 @@ void CModelPWPopovJKR::CalculatePW(double _time, double _timeStep, size_t _iWall
 	_collision->vResultMoment1 = moment;  // 只有粒子受力矩
 }
 
-void CModelPWPopovJKR::ConsolidatePart(double _time, double _timeStep, size_t _iPart, SParticleStruct& _particles, const SCollision* _collision) const
+void CModelPWSUP::ConsolidatePart(double _time, double _timeStep, size_t _iPart,
+                                   SParticleStruct& _particles, const SCollision* _collision) const
 {
 	_particles.Force(_iPart)  += _collision->vTotalForce;
 	_particles.Moment(_iPart) += _collision->vResultMoment1;
 }
 
-void CModelPWPopovJKR::ConsolidateWall(double _time, double _timeStep, size_t _iWall, SWallStruct& _walls, const SCollision* _collision) const
+void CModelPWSUP::ConsolidateWall(double _time, double _timeStep, size_t _iWall,
+                                   SWallStruct& _walls, const SCollision* _collision) const
 {
 	// 墙只受反作用力，不受力矩
 	_walls.Force(_iWall) -= _collision->vTotalForce;
