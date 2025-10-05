@@ -6,7 +6,7 @@
 #include "ModelPWSUP.h"
 #include <device_launch_parameters.h>
 
-__constant__ double m_vConstantModelParameters[2];
+__constant__ double m_vConstantModelParameters[1];
 __constant__ SPBC PBC;
 
 void CModelPWSUP::SetParametersGPU(const std::vector<double>& _parameters, const SPBC& _pbc)
@@ -96,7 +96,6 @@ __global__ void CUDA_CalcPWForce_SUP_kernel(
 		
 		// 获取SUP参数
 		const double l     = m_vConstantModelParameters[0];
-		const double gamma = m_vConstantModelParameters[1];
 		
 		// 粒子中心到墙接触点的向量
 		const CVector3 rc     = GPU_GET_VIRTUAL_COORDINATE(_partCoords[iPart]) - _collContactPoints[iColl];
@@ -122,29 +121,25 @@ __global__ void CUDA_CalcPWForce_SUP_kernel(
 		// 接触区域半径
 		const double contactAreaRadius = sqrt(partRadius * normOverlap);
 		
-		// SUP缩放的法向刚度
-		const double Kn = 2 * prop.dEquivYoungModulus * contactAreaRadius * l;
+		// 修正：SUP模型不缩放材料参数。刚度 Kn 应使用原始杨氏模量。
+		const double Kn = 2 * prop.dEquivYoungModulus * contactAreaRadius; // 移除 * l
 		
-		// 法向力（Hertz-Mindlin + JKR）
+		// 法向力（Hertz-Mindlin + JKR）- 计算原始力 F_NO
 		double normContactForceLen;
-		if (gamma > 0) {
+		if (prop.dEquivSurfaceEnergy > 0) {
 			const double a3 = pow(contactAreaRadius, 3.0);
-			// PW情况下，等效半径就是粒子半径
-			const double elasticForce = 4.0 * a3 * prop.dEquivYoungModulus * l / 
-			                             (3.0 * partRadius);
-			const double adhesionForce = sqrt(8 * PI * prop.dEquivYoungModulus * l * 
-			                                   gamma * l * l * a3);
+			// 修正：弹性力项不应包含 l 因子
+			const double elasticForce = 4.0 * a3 * prop.dEquivYoungModulus / (3.0 * partRadius); // 移除 * l
+			// 修正：粘附力项不应包含 l 因子
+			const double adhesionForce = sqrt(8 * PI * prop.dEquivYoungModulus * prop.dEquivSurfaceEnergy * a3); // 移除 l*...*l*l
 			// PW需要方向项
-			normContactForceLen = (elasticForce - adhesionForce) * 
-			                      fabs(DotProduct(rcNorm, normVector));
+			normContactForceLen = (elasticForce - adhesionForce) * fabs(DotProduct(rcNorm, normVector));
 		} else {
-			// 纯Hertz-Mindlin - PW的符号处理
-			normContactForceLen = 2.0 / 3.0 * normOverlap * Kn * 
-			                      fabs(DotProduct(rcNorm, normVector));
+			// 纯Hertz-Mindlin - 使用修正后的 Kn
+			normContactForceLen = 2.0 / 3.0 * normOverlap * Kn * fabs(DotProduct(rcNorm, normVector));
 		}
 		
-		const double normDampingForceLen = _2_SQRT_5_6 * prop.dAlpha * normRelVelLen * 
-		                                    sqrt(Kn * _partMasses[iPart]);
+		const double normDampingForceLen = _2_SQRT_5_6 * prop.dAlpha * normRelVelLen * sqrt(Kn * _partMasses[iPart]); // 使用修正后的 Kn
 		const CVector3 normForce = normVector * (normContactForceLen + normDampingForceLen);
 		
 		// 旋转切向重叠
@@ -156,37 +151,33 @@ __global__ void CUDA_CalcPWForce_SUP_kernel(
 		// 新的切向重叠
 		CVector3 tangOverlap = tangOverlapRot + tangRelVel * _timeStep;
 		
-		// SUP缩放的切向刚度
-		const double Kt = 8 * prop.dEquivShearModulus * contactAreaRadius * l;
+		// 修正：SUP模型不缩放材料参数。刚度 Kt 应使用原始剪切模量。
+		const double Kt = 8 * prop.dEquivShearModulus * contactAreaRadius; // 移除 * l
 		// PW中切向力符号相反
 		const CVector3 tangShearForce = -Kt * tangOverlap;
-		const CVector3 tangDampingForce = tangRelVel * 
-		                                   (_2_SQRT_5_6 * prop.dAlpha * 
-		                                    sqrt(Kt * _partMasses[iPart]));
+		const CVector3 tangDampingForce = tangRelVel * (_2_SQRT_5_6 * prop.dAlpha * sqrt(Kt * _partMasses[iPart])); // 使用修正后的 Kt
 		
 		// 滑动检查
 		CVector3 tangForce;
 		const double tangShearForceLen = tangShearForce.Length();
-		const double frictionForceLen = prop.dSlidingFriction * 
-		                                 fabs(normContactForceLen + normDampingForceLen);
+		const double frictionForceLen = prop.dSlidingFriction * fabs(normContactForceLen + normDampingForceLen);
 		
 		if (tangShearForceLen > frictionForceLen) {
 			tangForce = tangShearForce * frictionForceLen / tangShearForceLen;
-			tangOverlap = tangForce / -Kt;  // 注意负号
+			tangOverlap = tangForce / -Kt;  // 注意负号，使用修正后的 Kt
 		} else {
 			tangForce = tangShearForce + tangDampingForce;
 		}
 		
-		// 滚动阻力 - 只作用于粒子
+		// 滚动阻力 - 计算原始力矩 M_RO
 		const CVector3 rollingTorque = partAnglVel.IsSignificant() ? 
-		                                partAnglVel * (-prop.dRollingFriction * 
-		                                               fabs(normContactForceLen) * partRadius / 
+		                                partAnglVel * (-prop.dRollingFriction * fabs(normContactForceLen) * partRadius / 
 		                                               partAnglVel.Length()) : CVector3{0};
 		
 		// 应用SUP缩放
-		const CVector3 totalForce = (normForce + tangForce) * l * l;  // F_S = l² × F_O
-		// PW的力矩计算
-		const CVector3 moment = (normVector * tangForce * -partRadius + rollingTorque) * l * l * l;
+		const CVector3 totalForce = (normForce + tangForce) * l * l;  // F_S = l² × F_O (保持不变)
+		// 修正：力矩缩放 M_S = l² × M_O
+		const CVector3 moment = (normVector * tangForce * -partRadius + rollingTorque) * l * l; // 移除错误的 * l
 		
 		// 存储结果
 		_collTangOverlaps[iColl] = tangOverlap;

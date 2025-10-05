@@ -13,14 +13,12 @@ CModelPWPopovJKR::CModelPWPopovJKR()
 	
 	// SUP模型参数
 	/* 0*/ AddParameter("SCALE_FACTOR", "SUP scale factor l", 1.0);
-	/* 1*/ AddParameter("SURFACE_ENERGY", "Surface energy density [J/m²]", 0.0);
 }
 
 void CModelPWPopovJKR::CalculatePW(double _time, double _timeStep, size_t _iWall, size_t _iPart, const SInteractProps& _interactProp, SCollision* _collision) const
 {
 	// 获取SUP参数
 	const double l = m_parameters[0].value;      // SUP缩放因子
-	const double gamma = m_parameters[1].value;  // 表面能密度 (JKR粘附)
 	
 	// 获取粒子属性
 	const double   partRadius  = Particles().Radius(_iPart);
@@ -51,30 +49,29 @@ void CModelPWPopovJKR::CalculatePW(double _time, double _timeStep, size_t _iWall
 	// 接触区域半径（基于实际重叠）
 	const double contactAreaRadius = std::sqrt(partRadius * normOverlap);
 	
-	// SUP缩放的法向刚度
-	const double Kn = 2 * _interactProp.dEquivYoungModulus * contactAreaRadius * l;
+	// 修正：SUP模型不缩放材料参数。刚度 Kn 不应包含 l 因子。
+	const double Kn = 2 * _interactProp.dEquivYoungModulus * contactAreaRadius;
 	
-	// 计算法向力（Hertz-Mindlin + JKR粘附）
+	// 计算法向力（Hertz-Mindlin + JKR粘附）- 计算原始力 F_NO
 	double normContactForceLen;
 	
-	if (gamma > 0) {
-		// JKR粘附力（SUP缩放）
+	if (_interactProp.dEquivSurfaceEnergy > 0) {
+		// 修正：SUP模型不缩放表面能。 elasticForce 和 adhesionForce 都不应包含 l 因子。
 		const double a3 = std::pow(contactAreaRadius, 3.0);
-		// 注意：对于PW，等效半径应该是粒子半径（墙视为无限半径）
-		const double elasticForce = 4.0 * a3 * _interactProp.dEquivYoungModulus * l / 
+		// PW情况下，等效半径就是粒子半径
+		const double elasticForce = 4.0 * a3 * _interactProp.dEquivYoungModulus / // 移除 * l
 		                             (3.0 * partRadius);
-		const double adhesionForce = std::sqrt(8 * PI * _interactProp.dEquivYoungModulus * l * 
-		                                        gamma * l * l * a3);  // γ缩放为l²
+		// JKR粘附力项
+		const double adhesionForce = std::sqrt(8 * PI * _interactProp.dEquivYoungModulus * _interactProp.dEquivSurfaceEnergy * a3);
 		// PW中需要加上方向项
 		normContactForceLen = (elasticForce - adhesionForce) * std::abs(DotProduct(rcNorm, normVector));
 	} else {
-		// 纯Hertz-Mindlin（无粘附）- 注意PW中的符号和方向处理
+		// 纯Hertz-Mindlin（无粘附）- 使用修正后的 Kn
 		normContactForceLen = 2.0 / 3.0 * normOverlap * Kn * std::abs(DotProduct(rcNorm, normVector));
 	}
 	
-	// 法向阻尼力
-	const double normDampingForceLen = _2_SQRT_5_6 * _interactProp.dAlpha * normRelVelLen * 
-	                                    std::sqrt(Kn * Particles().Mass(_iPart));
+	// 法向阻尼力 - 使用修正后的 Kn
+	const double normDampingForceLen = _2_SQRT_5_6 * _interactProp.dAlpha * normRelVelLen * std::sqrt(Kn * Particles().Mass(_iPart));
 	const CVector3 normForce = normVector * (normContactForceLen + normDampingForceLen);
 	
 	// 旋转旧的切向重叠
@@ -86,37 +83,33 @@ void CModelPWPopovJKR::CalculatePW(double _time, double _timeStep, size_t _iWall
 	// 计算新的切向重叠
 	CVector3 tangOverlap = tangOverlapRot + tangRelVel * _timeStep;
 	
-	// SUP缩放的切向刚度
-	const double Kt = 8 * _interactProp.dEquivShearModulus * contactAreaRadius * l;
+	// 修正：SUP模型不缩放材料参数。刚度 Kt 不应包含 l 因子。
+	const double Kt = 8 * _interactProp.dEquivShearModulus * contactAreaRadius; // 移除 * l
 	// 注意：PW中切向力符号相反
 	const CVector3 tangShearForce = -Kt * tangOverlap;
-	const CVector3 tangDampingForce = tangRelVel * 
-	                                   (_2_SQRT_5_6 * _interactProp.dAlpha * 
-	                                    std::sqrt(Kt * Particles().Mass(_iPart)));
+	const CVector3 tangDampingForce = tangRelVel * (_2_SQRT_5_6 * _interactProp.dAlpha * std::sqrt(Kt * Particles().Mass(_iPart)));
 	
 	// 检查滑动条件
 	CVector3 tangForce;
 	const double tangShearForceLen = tangShearForce.Length();
-	const double frictionForceLen = _interactProp.dSlidingFriction * 
-	                                 std::abs(normContactForceLen + normDampingForceLen);
+	const double frictionForceLen = _interactProp.dSlidingFriction * std::abs(normContactForceLen + normDampingForceLen);
 	
 	if (tangShearForceLen > frictionForceLen) {
 		tangForce = tangShearForce * frictionForceLen / tangShearForceLen;
-		tangOverlap = tangForce / -Kt;  // 注意负号
+		tangOverlap = tangForce / -Kt;  // 注意负号，使用修正后的 Kt
 	} else {
 		tangForce = tangShearForce + tangDampingForce;
 	}
 	
-	// 滚动阻力（SUP缩放）- 只作用于粒子
+	// 滚动阻力（计算原始力矩 M_RO）
 	const CVector3 rollingTorque = partAnglVel.IsSignificant() ? 
-	                                partAnglVel * (-_interactProp.dRollingFriction * 
-	                                               std::abs(normContactForceLen) * partRadius / 
+	                                partAnglVel * (-_interactProp.dRollingFriction * std::abs(normContactForceLen) * partRadius / 
 	                                               partAnglVel.Length()) : CVector3{0};
 	
 	// 应用SUP缩放到最终的力和力矩
-	const CVector3 totalForce = (normForce + tangForce) * l * l;  // 力缩放 l²
-	// PW中力矩计算：注意符号和缩放
-	const CVector3 moment = (normVector * tangForce * -partRadius + rollingTorque) * l * l * l;  // 力矩缩放 l³
+	const CVector3 totalForce = (normForce + tangForce) * l * l;  // 力缩放 l² (保持不变)
+	// 修正：力矩缩放应为 l² (M_S = l² * M_O)
+	const CVector3 moment = (normVector * tangForce * -partRadius + rollingTorque) * l * l; // 移除 * l
 	
 	// 存储结果
 	_collision->vTangOverlap   = tangOverlap;
