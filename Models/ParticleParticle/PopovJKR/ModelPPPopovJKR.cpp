@@ -13,7 +13,6 @@ CModelPPPopovJKR::CModelPPPopovJKR()
     
 	// SUP模型参数
 	/* 0*/ AddParameter("SCALE_FACTOR", "SUP scale factor l", 1.0);
-	/* 1*/ AddParameter("SURFACE_ENERGY", "Surface energy density [J/m²]", 0.0);
 }
 
 void CModelPPPopovJKR::CalculatePP(double _time, double _timeStep, size_t _iSrc, size_t _iDst, const SInteractProps& _interactProp, SCollision* _collision) const
@@ -63,7 +62,7 @@ void CModelPPPopovJKR::CalculatePP(double _time, double _timeStep, size_t _iSrc,
 		normContactForceLen = -1.0 * (elasticForce - adhesionForce);
 	} else {
 		// 纯Hertz-Mindlin（无粘附）
-		normContactForceLen = 2.0 / 3.0 * _collision->dNormalOverlap * Kn;
+		normContactForceLen = - 2.0 / 3.0 * _collision->dNormalOverlap * Kn;
 	}
 			
 	// 法向阻尼力（使用修正后的 Kn）

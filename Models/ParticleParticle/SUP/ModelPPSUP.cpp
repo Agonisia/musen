@@ -63,7 +63,7 @@ void CModelPPSUP::CalculatePP(double _time, double _timeStep, size_t _iSrc, size
 		normContactForceLen = -1.0 * (elasticForce - adhesionForce);
 	} else {
 		// 纯Hertz-Mindlin（无粘附）
-		normContactForceLen = 2.0 / 3.0 * _collision->dNormalOverlap * Kn;
+		normContactForceLen = - 2.0 / 3.0 * _collision->dNormalOverlap * Kn;
 	}
 			
 	// 法向阻尼力（使用修正后的 Kn）

@@ -133,7 +133,7 @@ __global__ void CUDA_CalcPWForce_PopovJKR_kernel(
 			// 修正：粘附力项不应包含 l 因子
 			const double adhesionForce = sqrt(8 * PI * prop.dEquivYoungModulus * prop.dEquivSurfaceEnergy * a3); // 移除 l*...*l*l
 			// PW需要方向项
-			normContactForceLen = (elasticForce - adhesionForce) * fabs(DotProduct(rcNorm, normVector));
+			normContactForceLen = elasticForce - (adhesionForce * fabs(DotProduct(rcNorm, normVector)));
 		} else {
 			// 纯Hertz-Mindlin - 使用修正后的 Kn
 			normContactForceLen = 2.0 / 3.0 * normOverlap * Kn * fabs(DotProduct(rcNorm, normVector));

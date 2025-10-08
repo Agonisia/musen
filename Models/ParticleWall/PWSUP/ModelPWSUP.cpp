@@ -65,7 +65,7 @@ void CModelPWSUP::CalculatePW(double _time, double _timeStep, size_t _iWall, siz
 		// JKR粘附力项
 		const double adhesionForce = std::sqrt(8 * PI * _interactProp.dEquivYoungModulus * _interactProp.dEquivSurfaceEnergy * a3);
 		// PW中需要加上方向项
-		normContactForceLen = (elasticForce - adhesionForce) * std::abs(DotProduct(rcNorm, normVector));
+		normContactForceLen = elasticForce - (adhesionForce * std::abs(DotProduct(rcNorm, normVector)));
 	} else {
 		// 纯Hertz-Mindlin（无粘附）- 使用修正后的 Kn
 		normContactForceLen = 2.0 / 3.0 * normOverlap * Kn * std::abs(DotProduct(rcNorm, normVector));

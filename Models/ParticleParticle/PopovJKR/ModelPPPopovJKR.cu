@@ -117,7 +117,7 @@ __global__ void CUDA_CalcPPForce_PopovJKR_kernel(
 			normContactForceLen = -1.0 * (elasticForce - adhesionForce);
 		} else {
 			// 使用修正后的 Kn
-			normContactForceLen = 2.0 / 3.0 * normOverlap * Kn;
+			normContactForceLen = - 2.0 / 3.0 * normOverlap * Kn;
 		}
 		
 		const double normDampingForceLen = -_2_SQRT_5_6 * prop.dAlpha * normRelVelLen * sqrt(Kn * equivMass);
