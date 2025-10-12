@@ -73,105 +73,140 @@ __global__ void CUDA_CalcPPForce_SUP_kernel(
 		iActivColl < *_collActiveCollisionsNum; 
 		iActivColl += blockDim.x * gridDim.x)
 	{
-		const unsigned       iColl         = _collActivityIndices[iActivColl];
-		const unsigned       iPart1        = _collSrcIDs[iColl];
-		const unsigned       iPart2        = _collDstIDs[iColl];
-		const SInteractProps prop          = _interactProps[_collInteractPropIDs[iColl]];
-		const double         normOverlap   = _collNormalOverlaps[iColl];
-		const double         equivMass     = _collEquivMasses[iColl];
-		const double         equivRadius   = _collEquivRadii[iColl];
-		const CVector3       anglVel1      = _partAnglVels[iPart1];
-		const CVector3       anglVel2      = _partAnglVels[iPart2];
-		const double         radius1       = _partRadii[iPart1];
-		const double         radius2       = _partRadii[iPart2];
-		const CVector3       contactVector = _collContactVectors[iColl];
-		const CVector3       tangOverlapOld = _collTangOverlaps[iColl];
+		const unsigned       iColl              = _collActivityIndices[iActivColl];
+		const unsigned       iPart1             = _collSrcIDs[iColl];
+		const unsigned       iPart2             = _collDstIDs[iColl];
+		const SInteractProps prop               = _interactProps[_collInteractPropIDs[iColl]];
+		const CVector3       tangOverlapOld     = _collTangOverlaps[iColl];
 		
-		// 获取SUP缩放因子（从常量内存）
+		// 获取SUP缩放因子
 		const double l = m_vConstantModelParameters[0];
 		
-		const CVector3 rc1        = contactVector * (radius1 / (radius1 + radius2));
-		const CVector3 rc2        = contactVector * (-radius2 / (radius1 + radius2));
-		const CVector3 normVector = contactVector.Normalized();
+		// ========== 第一步：从放大颗粒参数转换到原始颗粒参数 ==========
 		
-		// 相对速度
-		const CVector3 relVel        = (_partVels[iPart2] + anglVel2 * rc2) - 
-		                                (_partVels[iPart1] + anglVel1 * rc1);
-		const double   normRelVelLen = DotProduct(normVector, relVel);
-		const CVector3 normRelVel    = normRelVelLen * normVector;
-		const CVector3 tangRelVel    = relVel - normRelVel;
+		// 1. 几何参数转换
+		const double radius1_S = _partRadii[iPart1];      // 放大半径
+		const double radius2_S = _partRadii[iPart2];
+		const double radius1_O = radius1_S / l;           // 原始半径
+		const double radius2_O = radius2_S / l;
 		
-		// 接触区域半径
-		const double contactAreaRadius = sqrt(equivRadius * normOverlap);
+		// 2. 重叠量转换：δ_O = δ_S / l
+		const double overlap_S = _collNormalOverlaps[iColl];
+		const double overlap_O = overlap_S / l;
+		const double equivRadius_S = _collEquivRadii[iColl];
+		const double equivRadius_O = equivRadius_S / l;
+		const double equivMass_O = _collEquivMasses[iColl] / (l * l * l);  // 质量缩放 m_O = m_S/l³
 		
-		// 修正：SUP模型不缩放材料参数。刚度 Kn 应使用原始杨氏模量。
-		const double Kn = 2 * prop.dEquivYoungModulus * contactAreaRadius;
+		// 3. 角速度转换：ω_O = l × ω_S
+		const CVector3 anglVel1_S = _partAnglVels[iPart1];
+		const CVector3 anglVel2_S = _partAnglVels[iPart2];
+		const CVector3 anglVel1_O = anglVel1_S * l;
+		const CVector3 anglVel2_O = anglVel2_S * l;
 		
-		// 法向力（Hertz-Mindlin + JKR）- 计算原始力 F_NO
-		double normContactForceLen;
+		// 4. 接触向量（转换到原始尺度）
+		const CVector3 contactVector_S = _collContactVectors[iColl];
+		const CVector3 contactVector_O = contactVector_S / l;
+		const CVector3 rc1_O = contactVector_O * (radius1_O / (radius1_O + radius2_O));
+		const CVector3 rc2_O = contactVector_O * (-radius2_O / (radius1_O + radius2_O));
+		const CVector3 normVector = contactVector_S.Normalized();
+		
+		// 5. 相对速度计算（使用原始参数）
+		const CVector3 relVel = (_partVels[iPart2] + anglVel2_O * rc2_O) - 
+		                        (_partVels[iPart1] + anglVel1_O * rc1_O);
+		const double normRelVelLen = DotProduct(normVector, relVel);
+		const CVector3 normRelVel = normRelVelLen * normVector;
+		const CVector3 tangRelVel = relVel - normRelVel;
+		
+		// ========== 第二步：使用原始参数计算原始颗粒的力和力矩 ==========
+		
+		// 1. 接触区域半径（基于原始重叠）
+		const double contactAreaRadius_O = sqrt(equivRadius_O * overlap_O);
+		
+		// 2. 法向刚度（原始颗粒）
+		const double Kn_O = 2 * prop.dEquivYoungModulus * contactAreaRadius_O;
+		
+		// 3. 法向力（原始颗粒）
+		double normContactForceLen_O;
 		if (prop.dEquivSurfaceEnergy > 0) {
-			const double a3 = pow(contactAreaRadius, 3.0);
-			// 修正：弹性力项不应包含 l 因子
-			const double elasticForce = 4.0 * a3 * prop.dEquivYoungModulus / (3.0 * equivRadius);
-			// 修正：粘附力项不应包含 l 因子
-			const double adhesionForce = sqrt(8 * PI * prop.dEquivYoungModulus * prop.dEquivSurfaceEnergy * a3);
-			normContactForceLen = -1.0 * (elasticForce - adhesionForce);
+			// JKR adhesion model
+			const double a3_O = pow(contactAreaRadius_O, 3.0);
+			const double elasticForce = 4.0 * a3_O * prop.dEquivYoungModulus / (3.0 * equivRadius_O);
+			const double adhesionForce = sqrt(8 * PI * prop.dEquivYoungModulus * 
+			                                  prop.dEquivSurfaceEnergy * a3_O);
+			normContactForceLen_O = -1.0 * (elasticForce - adhesionForce);
 		} else {
-			// 使用修正后的 Kn
-			normContactForceLen = - 2.0 / 3.0 * normOverlap * Kn; // 负号！！
+			normContactForceLen_O = -2.0 / 3.0 * overlap_O * Kn_O;
 		}
 		
-		const double normDampingForceLen = -_2_SQRT_5_6 * prop.dAlpha * normRelVelLen * sqrt(Kn * equivMass);
-		const CVector3 normForce = normVector * (normContactForceLen + normDampingForceLen);
+		const double normDampingForceLen_O = -_2_SQRT_5_6 * prop.dAlpha * normRelVelLen * 
+		                                     sqrt(Kn_O * equivMass_O);
+		const CVector3 normForce_O = normVector * (normContactForceLen_O + normDampingForceLen_O);
 		
-		// 旋转切向重叠
+		// 4. 切向力（原始颗粒）
+		// 旋转旧的切向重叠
 		CVector3 tangOverlapRot = tangOverlapOld - normVector * DotProduct(normVector, tangOverlapOld);
 		if (tangOverlapRot.IsSignificant()) {
 			tangOverlapRot *= tangOverlapOld.Length() / tangOverlapRot.Length();
 		}
-
-		// 新的切向重叠
-		CVector3 tangOverlap = tangOverlapRot + tangRelVel * _timeStep;
 		
-		// 修正：SUP模型不缩放材料参数。刚度 Kt 应使用原始剪切模量。
-		const double Kt = 8 * prop.dEquivShearModulus * contactAreaRadius;
-		const CVector3 tangShearForce = tangOverlap * Kt;
-		const CVector3 tangDampingForce = tangRelVel * (-_2_SQRT_5_6 * prop.dAlpha * sqrt(Kt * equivMass));
+		// 计算新的切向重叠（使用原始时间步长）
+		// 注意：与CPU代码保持一致，暂时不缩放时间步长
+		// const double timeStep_O = _timeStep / l;  // 时间步长缩放：Δt_O = Δt_S / l
+		const double timeStep_O = _timeStep;  // 暂时不缩放时间步长
+		CVector3 tangOverlap_O = tangOverlapRot / l + tangRelVel * timeStep_O;  // 转换到原始尺度
 		
-		// 滑动检查
-		CVector3 tangForce;
-		const double tangShearForceLen = tangShearForce.Length();
-		const double frictionForceLen = prop.dSlidingFriction * fabs(normContactForceLen + normDampingForceLen);
+		// 切向刚度（原始颗粒）
+		const double Kt_O = 8 * prop.dEquivShearModulus * contactAreaRadius_O;
+		const CVector3 tangShearForce_O = tangOverlap_O * Kt_O;
+		const CVector3 tangDampingForce_O = tangRelVel * (-_2_SQRT_5_6 * prop.dAlpha * 
+		                                                   sqrt(Kt_O * equivMass_O));
+		
+		// 检查滑动条件
+		CVector3 tangForce_O;
+		const double tangShearForceLen = tangShearForce_O.Length();
+		const double frictionForceLen = prop.dSlidingFriction * 
+		                                fabs(normContactForceLen_O + normDampingForceLen_O);
 		
 		if (tangShearForceLen > frictionForceLen) {
-			tangForce = tangShearForce * frictionForceLen / tangShearForceLen;
-			tangOverlap = tangForce / Kt; // 使用修正后的 Kt
+			tangForce_O = tangShearForce_O * frictionForceLen / tangShearForceLen;
+			tangOverlap_O = tangForce_O / Kt_O;
 		} else {
-			tangForce = tangShearForce + tangDampingForce;
+			tangForce_O = tangShearForce_O + tangDampingForce_O;
 		}
 		
-		// 滚动阻力 - 计算原始力矩 M_RO
-		const CVector3 rollingTorque1 = anglVel1.IsSignificant() ? 
-		        anglVel1 * (-prop.dRollingFriction * fabs(normContactForceLen) * radius1 / anglVel1.Length()) : CVector3{0};
-		const CVector3 rollingTorque2 = anglVel2.IsSignificant() ? 
-		        anglVel2 * (-prop.dRollingFriction * fabs(normContactForceLen) * radius2 / anglVel2.Length()) : CVector3{0};
+		// 5. 接触力矩（原始颗粒，使用原始半径）
+		const CVector3 contactTorque1_O = normVector * tangForce_O * radius1_O;
+		const CVector3 contactTorque2_O = normVector * tangForce_O * radius2_O;
 		
-		// 应用SUP缩放
-		// 1. 力缩放：F_S = l² × F_O （保持不变）
-		const CVector3 totalForce    = (normForce + tangForce) * l * l;
-        
-		// 2. 力矩缩放：M_S = l² × M_O （修正为 l²）
-		const CVector3 resultMoment1 = (normVector * tangForce * radius1 + rollingTorque1) * l * l; // 移除错误的 * l
-		const CVector3 resultMoment2 = (normVector * tangForce * radius2 + rollingTorque2) * l * l; // 移除错误的 * l
+		// 6. 滚动阻力力矩（原始颗粒，使用原始半径和原始角速度）
+		const CVector3 rollingTorque1_O = anglVel1_O.IsSignificant() ? 
+			anglVel1_O * (-prop.dRollingFriction * fabs(normContactForceLen_O) * 
+			              radius1_O / anglVel1_O.Length()) : CVector3{0};
+		const CVector3 rollingTorque2_O = anglVel2_O.IsSignificant() ? 
+			anglVel2_O * (-prop.dRollingFriction * fabs(normContactForceLen_O) * 
+			              radius2_O / anglVel2_O.Length()) : CVector3{0};
 		
-		// 存储结果
-		_collTangOverlaps[iColl] = tangOverlap;
-		_collTotalForces[iColl]  = totalForce;
+		// 7. 总原始力矩
+		const CVector3 totalMoment1_O = contactTorque1_O + rollingTorque1_O;
+		const CVector3 totalMoment2_O = contactTorque2_O + rollingTorque2_O;
+		
+		// ========== 第三步：SUP缩放到放大系统 ==========
+		
+		// 力缩放：F_S = l² × F_O
+		const CVector3 totalForce_S = (normForce_O + tangForce_O) * l * l;
+		
+		// 力矩缩放：M_S = l² × M_O
+		const CVector3 moment1_S = totalMoment1_O * l * l;
+		const CVector3 moment2_S = totalMoment2_O * l * l;
+		
+		// ========== 存储结果（注意：切向重叠需要转换回放大尺度）==========
+		_collTangOverlaps[iColl] = tangOverlap_O * l;  // 转换回放大尺度存储
+		_collTotalForces[iColl] = totalForce_S;
 		
 		// 应用力和力矩
-		CUDA_VECTOR3_ATOMIC_ADD(_partForces[iPart1], totalForce);
-		CUDA_VECTOR3_ATOMIC_SUB(_partForces[iPart2], totalForce);
-		CUDA_VECTOR3_ATOMIC_ADD(_partMoments[iPart1], resultMoment1);
-		CUDA_VECTOR3_ATOMIC_ADD(_partMoments[iPart2], resultMoment2);
+		CUDA_VECTOR3_ATOMIC_ADD(_partForces[iPart1], totalForce_S);
+		CUDA_VECTOR3_ATOMIC_SUB(_partForces[iPart2], totalForce_S);
+		CUDA_VECTOR3_ATOMIC_ADD(_partMoments[iPart1], moment1_S);
+		CUDA_VECTOR3_ATOMIC_ADD(_partMoments[iPart2], moment2_S);
 	}
 }

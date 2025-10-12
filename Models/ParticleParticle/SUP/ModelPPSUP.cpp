@@ -21,108 +21,126 @@ void CModelPPSUP::CalculatePP(double _time, double _timeStep, size_t _iSrc, size
 	// 获取SUP缩放因子
 	const double l = m_parameters[0].value;
 	
-	// 获取粒子属性
-	const CVector3 anglVel1 = Particles().AnglVel(_iSrc);
-	const CVector3 anglVel2 = Particles().AnglVel(_iDst);
-	const double   radius1  = Particles().Radius(_iSrc);
-	const double   radius2  = Particles().Radius(_iDst);
+	// ========== 第一步：从放大颗粒参数转换到原始颗粒参数 ==========
 	
-	// 计算接触向量
-	const CVector3 rc1        = _collision->vContactVector * (radius1 / (radius1 + radius2));
-	const CVector3 rc2        = _collision->vContactVector * (-radius2 / (radius1 + radius2));
+	// 1. 几何参数转换
+	const double radius1_S = Particles().Radius(_iSrc);  // 放大半径
+	const double radius2_S = Particles().Radius(_iDst);
+	const double radius1_O = radius1_S / l;  // 原始半径
+	const double radius2_O = radius2_S / l;
+	
+	// 2. 重叠量转换：δ_O = δ_S / l
+	const double overlap_S = _collision->dNormalOverlap;
+	const double overlap_O = overlap_S / l;
+	const double equivRadius_S = _collision->dEquivRadius;
+	const double equivRadius_O = equivRadius_S / l;
+	const double equivMass_O = _collision->dEquivMass / (l * l * l);  // 质量缩放 m_O = m_S/l³
+	
+	// 3. 角速度转换：ω_O = l × ω_S
+	const CVector3 anglVel1_S = Particles().AnglVel(_iSrc);
+	const CVector3 anglVel2_S = Particles().AnglVel(_iDst);
+	const CVector3 anglVel1_O = anglVel1_S * l;
+	const CVector3 anglVel2_O = anglVel2_S * l;
+	
+	// 4. 接触向量（注意：这里也需要转换到原始尺度）
+	const CVector3 contactVector_O = _collision->vContactVector / l;
+	const CVector3 rc1_O = contactVector_O * (radius1_O / (radius1_O + radius2_O));
+	const CVector3 rc2_O = contactVector_O * (-radius2_O / (radius1_O + radius2_O));
 	const CVector3 normVector = _collision->vContactVector.Normalized();
 	
-	// 相对速度计算
-	// 注：SUP模型假设 v_O = v_S，因此此处可以直接使用缩放后的粒子速度
-	const CVector3 relVel       = (Particles().Vel(_iDst) + anglVel2 * rc2) - 
-																(Particles().Vel(_iSrc) + anglVel1 * rc1);
-	const double   normRelVelLen = DotProduct(normVector, relVel);
-	const CVector3 normRelVel    = normRelVelLen * normVector;
-	const CVector3 tangRelVel    = relVel - normRelVel;
+	// 5. 相对速度计算（使用原始参数）
+	const CVector3 relVel = (Particles().Vel(_iDst) + anglVel2_O * rc2_O) - 
+	                        (Particles().Vel(_iSrc) + anglVel1_O * rc1_O);
+	const double normRelVelLen = DotProduct(normVector, relVel);
+	const CVector3 normRelVel = normRelVelLen * normVector;
+	const CVector3 tangRelVel = relVel - normRelVel;
 	
-	// 接触区域半径（基于实际重叠）
-	const double contactAreaRadius = std::sqrt(_collision->dEquivRadius * _collision->dNormalOverlap);
+	// ========== 第二步：使用原始参数计算原始颗粒的力和力矩 ==========
 	
-	// 法向刚度 Kn：SUP模型不缩放材料参数，因此不应包含 l 因子。
-	// 计算的是原始颗粒的刚度 K_nO
-	const double Kn = 2 * _interactProp.dEquivYoungModulus * contactAreaRadius; 
+	// 1. 接触区域半径（基于原始重叠）
+	const double contactAreaRadius_O = std::sqrt(equivRadius_O * overlap_O);
 	
-	// 计算法向力（Hertz-Mindlin + JKR粘附）
-	// 计算的是原始颗粒上的力 F_NO
-	double normContactForceLen;
-			
+	// 2. 法向刚度（原始颗粒）
+	const double Kn_O = 2 * _interactProp.dEquivYoungModulus * contactAreaRadius_O;
+	
+	// 3. 法向力（原始颗粒）
+	double normContactForceLen_O;
 	if (_interactProp.dEquivSurfaceEnergy > 0) {
-		// JKR粘附力：SUP模型不缩放表面能，因此 elasticForce 和 adhesionForce 
-		// 的计算中不应包含额外的 l 因子。
-		const double a3 = std::pow(contactAreaRadius, 3.0);
-		// 弹性力项
-		const double elasticForce = 4.0 * a3 * _interactProp.dEquivYoungModulus / // 移除 * l / 
-																(3.0 * _collision->dEquivRadius);
-		// 粘附力项
-		const double adhesionForce = std::sqrt(8 * PI * _interactProp.dEquivYoungModulus * _interactProp.dEquivSurfaceEnergy * a3); // 移除 * l 
-		normContactForceLen = -1.0 * (elasticForce - adhesionForce);
+		// JKR adhesion model
+		const double a3_O = std::pow(contactAreaRadius_O, 3.0);
+		const double elasticForce = 4.0 * a3_O * _interactProp.dEquivYoungModulus / (3.0 * equivRadius_O);
+		const double adhesionForce = std::sqrt(8 * PI * _interactProp.dEquivYoungModulus * 
+		                                       _interactProp.dEquivSurfaceEnergy * a3_O);
+		normContactForceLen_O = -1.0 * (elasticForce - adhesionForce);
 	} else {
-		// 纯Hertz-Mindlin（无粘附）
-		normContactForceLen = - 2.0 / 3.0 * _collision->dNormalOverlap * Kn;
+		normContactForceLen_O = -2.0 / 3.0 * overlap_O * Kn_O;
 	}
-			
-	// 法向阻尼力（使用修正后的 Kn）
-	const double normDampingForceLen = -_2_SQRT_5_6 * _interactProp.dAlpha * normRelVelLen * std::sqrt(Kn * _collision->dEquivMass);
-	const CVector3 normForce = normVector * (normContactForceLen + normDampingForceLen);
 	
+	const double normDampingForceLen_O = -_2_SQRT_5_6 * _interactProp.dAlpha * normRelVelLen * 
+	                                     std::sqrt(Kn_O * equivMass_O);
+	const CVector3 normForce_O = normVector * (normContactForceLen_O + normDampingForceLen_O);
+	
+	// 4. 切向力（原始颗粒）
 	// 旋转旧的切向重叠
-	CVector3 tangOverlapRot = _collision->vTangOverlap - 
-														normVector * DotProduct(normVector, _collision->vTangOverlap);
+	CVector3 tangOverlapRot = _collision->vTangOverlap - normVector * DotProduct(normVector, _collision->vTangOverlap);
 	if (tangOverlapRot.IsSignificant())
-			tangOverlapRot *= _collision->vTangOverlap.Length() / tangOverlapRot.Length();
+		tangOverlapRot *= _collision->vTangOverlap.Length() / tangOverlapRot.Length();
 	
-	// 计算新的切向重叠
-	CVector3 tangOverlap = tangOverlapRot + tangRelVel * _timeStep;
+	// 计算新的切向重叠（使用原始时间步长）
+	// const double timeStep_O = _timeStep / l;  // 时间步长缩放：Δt_O = Δt_S / l
+	const double timeStep_O = _timeStep;  // 暂时不缩放时间步长
+	CVector3 tangOverlap_O = tangOverlapRot / l + tangRelVel * timeStep_O;  // 转换到原始尺度
 	
-	// 切向刚度 Kt：SUP模型不缩放材料参数，因此不应包含 l 因子。
-	// 计算的是原始颗粒的刚度 K_tO
-	const double Kt = 8 * _interactProp.dEquivShearModulus * contactAreaRadius;
-	const CVector3 tangShearForce = tangOverlap * Kt;
-	const CVector3 tangDampingForce = tangRelVel * (-_2_SQRT_5_6 * _interactProp.dAlpha * std::sqrt(Kt * _collision->dEquivMass));
+	// 切向刚度（原始颗粒）
+	const double Kt_O = 8 * _interactProp.dEquivShearModulus * contactAreaRadius_O;
+	const CVector3 tangShearForce_O = tangOverlap_O * Kt_O;
+	const CVector3 tangDampingForce_O = tangRelVel * (-_2_SQRT_5_6 * _interactProp.dAlpha * 
+	                                                   std::sqrt(Kt_O * equivMass_O));
 	
 	// 检查滑动条件
-	CVector3 tangForce;
-	const double tangShearForceLen = tangShearForce.Length();
-	const double frictionForceLen = _interactProp.dSlidingFriction * std::abs(normContactForceLen + normDampingForceLen);
+	CVector3 tangForce_O;
+	const double tangShearForceLen = tangShearForce_O.Length();
+	const double frictionForceLen = _interactProp.dSlidingFriction * 
+	                                std::abs(normContactForceLen_O + normDampingForceLen_O);
 	
 	if (tangShearForceLen > frictionForceLen) {
-		tangForce = tangShearForce * frictionForceLen / tangShearForceLen;
-		tangOverlap = tangForce / Kt;
+		tangForce_O = tangShearForce_O * frictionForceLen / tangShearForceLen;
+		tangOverlap_O = tangForce_O / Kt_O;
 	} else {
-		tangForce = tangShearForce + tangDampingForce;
+		tangForce_O = tangShearForce_O + tangDampingForce_O;
 	}
-			
-	// 滚动阻力（CDT模型，计算原始颗粒的滚动阻力力矩 M_RO）
-	// 注：这部分计算的是 M_RO，使用原始半径 r1/r2 和原始法向力 |F_N|，无需修改
-	const CVector3 rollingTorque1 = anglVel1.IsSignificant() ? 
-			anglVel1 * (-_interactProp.dRollingFriction * std::abs(normContactForceLen) * radius1 / anglVel1.Length()) : CVector3{0};
-	const CVector3 rollingTorque2 = anglVel2.IsSignificant() ? 
-			anglVel2 * (-_interactProp.dRollingFriction * std::abs(normContactForceLen) * radius2 / anglVel2.Length()) : CVector3{0};
-			
-	// 应用SUP缩放到最终的力和力矩
-	// 1. 力缩放：F_S = l² × F_O （保持不变）
-	const CVector3 totalForce = (normForce + tangForce) * l * l; 
-
-	// 2. 力矩缩放：M_S = l² × M_O （修正为 l²）
-	// 原始力矩 M_IO = 接触力矩 M_CO + 滚动阻力力矩 M_RO
-	// M_CO = r × F_t = r * normVector × tangForce (注：代码中用的是 normVector * tangForce * radius，方向计算不严格，但遵循原代码结构进行缩放修正)
-	const CVector3 moment1 = (normVector * tangForce * radius1 + rollingTorque1) * l * l; 
-	const CVector3 moment2 = (normVector * tangForce * radius2 + rollingTorque2) * l * l;
 	
-	// 存储结果
-	// 注：由于 vTangForce 用于计算下一个时间步的切向重叠，其存储值需要是缩放前的切向力
-	//    如果 _collision->vTangForce 字段存储的是原始力，此处应该存储 tangForce * l * l。
-	//    但考虑到后续 ConsolidateSrc/Dst 使用 vTotalForce 和 vResultMoment，此处我们主要保证力矩缩放的正确性。
-	_collision->vTangOverlap   = tangOverlap;
-	_collision->vTangForce     = tangForce * l * l;   // 存储缩放后的切向力
-	_collision->vTotalForce    = totalForce;
-	_collision->vResultMoment1 = moment1;
-	_collision->vResultMoment2 = moment2;
+	// 5. 接触力矩（原始颗粒，使用原始半径）
+	const CVector3 contactTorque1_O = normVector * tangForce_O * radius1_O;
+	const CVector3 contactTorque2_O = normVector * tangForce_O * radius2_O;
+	
+	// 6. 滚动阻力力矩（原始颗粒，使用原始半径和原始角速度）
+	const CVector3 rollingTorque1_O = anglVel1_O.IsSignificant() ? 
+		anglVel1_O * (-_interactProp.dRollingFriction * std::abs(normContactForceLen_O) * 
+		              radius1_O / anglVel1_O.Length()) : CVector3{0};
+	const CVector3 rollingTorque2_O = anglVel2_O.IsSignificant() ? 
+		anglVel2_O * (-_interactProp.dRollingFriction * std::abs(normContactForceLen_O) * 
+		              radius2_O / anglVel2_O.Length()) : CVector3{0};
+	
+	// 7. 总原始力矩
+	const CVector3 totalMoment1_O = contactTorque1_O + rollingTorque1_O;
+	const CVector3 totalMoment2_O = contactTorque2_O + rollingTorque2_O;
+	
+	// ========== 第三步：SUP缩放到放大系统 ==========
+	
+	// 力缩放：F_S = l² × F_O
+	const CVector3 totalForce_S = (normForce_O + tangForce_O) * l * l;
+	
+	// 力矩缩放：M_S = l² × M_O
+	const CVector3 moment1_S = totalMoment1_O * l * l;
+	const CVector3 moment2_S = totalMoment2_O * l * l;
+	
+	// ========== 存储结果（注意：切向重叠需要转换回放大尺度）==========
+	_collision->vTangOverlap = tangOverlap_O * l;  // 转换回放大尺度存储
+	_collision->vTangForce = tangForce_O * l * l;  // 存储缩放后的切向力
+	_collision->vTotalForce = totalForce_S;
+	_collision->vResultMoment1 = moment1_S;
+	_collision->vResultMoment2 = moment2_S;
 }
 
 void CModelPPSUP::ConsolidateSrc(double _time, double _timeStep, size_t _iPart, 
